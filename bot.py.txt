@@ -1,0 +1,119 @@
+import os
+from telegram import Update
+from telegram.ext import Updater, CommandHandler, CallbackContext
+import sqlite3
+from datetime import datetime
+
+TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = 6233944675
+
+conn = sqlite3.connect("mlm.db", check_same_thread=False)
+cur = conn.cursor()
+
+cur.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    username TEXT,
+    referred_by INTEGER,
+    balance INTEGER,
+    join_date TEXT
+)
+""")
+
+cur.execute("""
+CREATE TABLE IF NOT EXISTS withdraw_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    amount INTEGER,
+    status TEXT,
+    date TEXT
+)
+""")
+conn.commit()
+
+def start(update: Update, context: CallbackContext):
+    user = update.effective_user
+    ref = context.args[0] if context.args else None
+
+    cur.execute("SELECT user_id FROM users WHERE user_id=?", (user.id,))
+    if cur.fetchone():
+        update.message.reply_text("✅ আপনি ইতিমধ্যেই রেজিস্টার্ড।")
+        return
+
+    cur.execute(
+        "INSERT INTO users VALUES (?,?,?,?,?)",
+        (user.id, user.username, ref, 0, str(datetime.now()))
+    )
+
+    if ref and ref != str(user.id):
+        cur.execute("UPDATE users SET balance = balance + 10 WHERE user_id=?", (ref,))
+        cur.execute("SELECT referred_by FROM users WHERE user_id=?", (ref,))
+        parent = cur.fetchone()
+        if parent and parent[0]:
+            cur.execute("UPDATE users SET balance = balance + 5 WHERE user_id=?", (parent[0],))
+
+    conn.commit()
+    update.message.reply_text("🎉 স্বাগতম! আপনার অ্যাকাউন্ট সফলভাবে তৈরি হয়েছে।")
+
+def invite(update: Update, context: CallbackContext):
+    uid = update.effective_user.id
+    link = f"https://t.me/{context.bot.username}?start={uid}"
+    update.message.reply_text(f"🔗 আপনার Referral Link:\n{link}")
+
+def balance(update: Update, context: CallbackContext):
+    uid = update.effective_user.id
+    cur.execute("SELECT balance FROM users WHERE user_id=?", (uid,))
+    bal = cur.fetchone()[0]
+    update.message.reply_text(f"💰 আপনার Balance: {bal}")
+
+def team(update: Update, context: CallbackContext):
+    uid = update.effective_user.id
+    cur.execute("SELECT COUNT(*) FROM users WHERE referred_by=?", (uid,))
+    l1 = cur.fetchone()[0]
+
+    cur.execute("""
+    SELECT COUNT(*) FROM users 
+    WHERE referred_by IN (SELECT user_id FROM users WHERE referred_by=?)
+    """, (uid,))
+    l2 = cur.fetchone()[0]
+
+    update.message.reply_text(f"👥 Team Info:\nLevel-1: {l1}\nLevel-2: {l2}")
+
+def withdraw(update: Update, context: CallbackContext):
+    uid = update.effective_user.id
+    if not context.args:
+        update.message.reply_text("❗ ব্যবহার: /withdraw 100")
+        return
+
+    amount = int(context.args[0])
+    cur.execute("SELECT balance FROM users WHERE user_id=?", (uid,))
+    bal = cur.fetchone()[0]
+
+    if amount > bal:
+        update.message.reply_text("❌ পর্যাপ্ত Balance নেই।")
+        return
+
+    cur.execute(
+        "INSERT INTO withdraw_requests VALUES (NULL,?,?,?,?)",
+        (uid, amount, "Pending", str(datetime.now()))
+    )
+    cur.execute("UPDATE users SET balance = balance - ? WHERE user_id=?", (amount, uid))
+    conn.commit()
+
+    context.bot.send_message(
+        ADMIN_ID,
+        f"📤 Withdraw Request\nUser ID: {uid}\nAmount: {amount}"
+    )
+    update.message.reply_text("✅ Withdraw request পাঠানো হয়েছে।")
+
+updater = Updater(TOKEN, use_context=True)
+dp = updater.dispatcher
+
+dp.add_handler(CommandHandler("start", start))
+dp.add_handler(CommandHandler("invite", invite))
+dp.add_handler(CommandHandler("balance", balance))
+dp.add_handler(CommandHandler("team", team))
+dp.add_handler(CommandHandler("withdraw", withdraw))
+
+updater.start_polling()
+updater.idle()
